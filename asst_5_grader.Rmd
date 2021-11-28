@@ -5,27 +5,27 @@ date: "11/27/2021"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 library(tidyverse)
 library(git2r)
 library(here)
+library(magrittr) ### for %$% pipe...
 
 ```
 
-# Clone all repos, count commits per person, render rmarkdown files
+# Setup
+
+## Read and clean repo names; create directories
+
+Manually downloaded the .csv of partners and repo links and saved in the project root dir as `asst_5_partners.csv`.
 
 ```{r}
-
-### Create a GitHub credential file
-cred <- cred_user_pass(username = 'oharac', password = 'pizzle9Dorf!')             
-# You can also use a PAT, depends on your configuration
 
 ### Read-in all repo names
 repos <- read_csv(here('asst_5_partners.csv'), skip = 2) %>%
   janitor::clean_names() %>%
-  # CSV was created manually... but you can copy and paste all from GitHub at the same time.
   distinct() %>%
   gather(task, repo, ends_with('repo_link')) %>%
   mutate(dir = basename(repo),
@@ -36,95 +36,95 @@ repos <- read_csv(here('asst_5_partners.csv'), skip = 2) %>%
 
 ### Create directories, unless they already exist
 if(any(!dir.exists(repos$dir))) {
+  message('creating directories for repos')
   tmp <- lapply(repos$dir, dir.create)
 }
+```
 
-### Clone repos, unless they have already been cloned
-if(!any(map_lgl(repos$dir, is_empty))) {                                      # Not sure about this logical statement. Run manually?
-  repos %>% head(30) %>% tail(1) %$%
-    walk2(url, dirs, clone, credentials = cred)
-}
+## Clone the repositories
 
-## Look into each repo and find all rmd files
-repos <- repos %>%
-  mutate(files = list.files(main_path,
-                            pattern = '*ej.Rmd|*grad.Rmd|enrollment.Rmd',        # Poor file naming...
-                            recursive = T,                                       # Look in folders, sub folders, and sub sub fodlers...
-                            full = T))                                           # Return the full absolute filepath
+Clone repos, unless they have already been cloned - in the `clone()` function, leaving `credentials = NULL` I believe will work fine as long as you've got your PAT all set up.
 
-# Add a text file telling people that I will be grading them
+```{r}
+urls <- repos$repo
+dirs <- repos$dir
+
+tmp <- lapply(seq_along(urls), FUN = function(i) {
+  fs <- list.files(dirs[i])
+  if(dir.exists(file.path(dirs[i], '.git'))) {
+    ### check for existing repo; if already a repo, report contents
+    fs <- list.files(dirs[i])
+    message('Directory ', basename(dirs[i]), ' is a .git repository and contains: \n', 
+            paste0('.../', fs, collapse = '\n'))
+  } else {
+    ### no existing repo? then clone it
+    message('Cloning ', urls[i], ' to ', basename(dirs[i]), '...')
+    clone(urls[i], dirs[i])
+  }
+})
+```
+
+## Identify Rmd files
+
+``` {r}
+rmds <- lapply(repos$dir, FUN = function(d) {
+  fs <- list.files(d, pattern = '.Rmd$', 
+                   recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
+  if(length(fs) == 0) fs <- 'NO RMD DETECTED!'
+  df <- data.frame(dir = d, 
+                   rmd = fs)
+}) %>%
+  bind_rows()
+
+repos_rmds <- repos %>%
+  left_join(rmds, by = 'dir')
+```
+
+Also, place a text file in the repo notifying that the repo is being graded.  Does this actually commit/push?  probably not if I'm not invited as a collaborator... skip it
+
+``` {r, eval = FALSE}
+# Add a text file telling people that I will be grading them - is this working?
 notify <- function(dir){
-  file <- file.path(dir, 'grading.txt')
-  file.create(file)
-  cat('You are now being graded!', file = file)
+  message('Notifying ', basename(dir))
+  f <- file.path(dir, 'grading.txt')
+  if(file.exists(f)) {
+    message('Already notified: ', f)
+    return(invisible(NULL))
+  }
+  file.create(f)
+  cat('Your repo has been graded!', file = f)
   add(repo = dir, 'grading.txt')
-  commit(dir, message = 'You are now being graded')
-  push(dir, credentials = cred)
+  commit(dir, message = 'grading the repo')
+  push(dir)
 }
 
 safely_notify <- safely(notify)
 
-notifications <- repos %$%
-  map(dirs, safely_notify)
+notifications <- lapply(repos$dir, safely_notify)
+```
 
 # General checks
+
 ## Who didn't store their rmd file in the src folder?
-rmd_not_in_src <- repos %>%
-  filter(!str_detect(files, 'src'))
 
-######################## Task 1
+Looks like the assignment wasn't super explicit about this - it says to create a `src` folder but not explicitly to put the `.Rmd` in it...
 
-## How many commit messages per user?
-task_1_commits <- repos %>%
-  filter(str_detect(dirs, 'ejscreen')) %>%                                        # Filter for task 1
-  mutate(results = map(dirs, get_commits)) %>%                                    # Get commit history of each repo
-  unnest(results) %>%                                                             # Format
-  count(repo, user) %>%                                                           # Count individual commits
-  filter(!user == 'GitHub')
+```{r}
+rmd_not_in_src <- repos_rmds %>%
+  filter(!str_detect(rmd, 'src'))
+```
 
-## Did anyone have less than 2 commits?
-less_than_2_t1 <- task_1_commits %>%
-  filter(n < 2)
+## Task 2
 
-# Does it render?
-safely_render <- safely(rmarkdown::render)
+### How many commit messages per user?
+``` {r}
+### helper functions:
+get_commits <- function(dir) {
+  dir_commits <- git2r::commits(dir) %>%
+    purrr::map_dfr(tabulize)
+  return(dir_commits)
+}
 
-# Render task 1
-results_task_1 <- repos %>%
-  filter(str_detect(dirs, 'ejscreen')) %>%                                       # Filter for task 2
-  mutate(run = map(files, safely_render, quiet = T, knit_root_dir = dirs)) %>%   # Safely render
-  unnest_wider(run)                                                              # Unnest the weird list
-
-######################### TASK 2
-
-#Comments are same as above...
-
-## How many commit messages per user?
-task_2_commits <- repos %>%
-  filter(str_detect(dirs, 'grad')) %>%
-  mutate(results = map(dirs, get_commits)) %>%
-  unnest(results) %>%
-  group_by(repo, user) %>%
-  count() %>%
-  filter(!user == 'GitHub')
-
-## Did anywone have less than 2 commits?
-less_than_2_t2 <- task_2_commits %>%
-  filter(n < 2)
-
-## Does it render?
-# Render task 2
-results_task_2 <- repos %>%
-  filter(str_detect(dirs, 'grad')) %>%
-  mutate(run = map(files, safely_render, quiet = T)) %>%
-  unnest_wider(run)
-
-
-# Clean everything up (this deletes all repos!)
-fs::dir_delete(repos$dirs)
-1:31
-1:32
-To count the number of commits, I used these two short functions:
 tabulize <- function(commit) {
   tibble::tibble(
     SHA  = commit$sha,
@@ -133,10 +133,91 @@ tabulize <- function(commit) {
   )
 }
 
-get_commits <- function(dir) {
-  dir_commits <- git2r::commits(dir) %>%
-    purrr::map_dfr(tabulize)
-  return(dir_commits)
-}
+task_2_commits <- repos_rmds %>%
+  filter(str_detect(dir, 'ejscreen')) %>%      # Filter for task 2
+  mutate(results = map(dir, get_commits)) %>%  # Get commit history of each repo
+  unnest(results) %>%                          # Format
+  count(repo, user) %>%                        # Count individual commits
+  filter(!user == 'GitHub')
+
+## Did anyone have fewer than 2 commits?
+less_than_2_t2 <- task_2_commits %>%
+  filter(n < 2)
+
+DT::datatable(task_2_commits)
+```
+
+
+### Does it render?
+
+For this, make sure to put a `data/ces3demographics.csv` in the project root folder so `here()` will properly find it!
+
+```{r drop all htmls, eval = FALSE}
+htmls <- list.files(here('asst_5_repos'), pattern = '.html$',
+                    recursive = TRUE, full.names = TRUE)
+unlink(htmls)
+```
+
+
+``` {r}
+safely_render <- safely(rmarkdown::render)
+
+# Render task 2
+results_task_2 <- repos_rmds %>%
+  filter(str_detect(dir, 'ejscreen')) %>%                                       
+    # Filter for task 2
+  mutate(run = map(rmd, safely_render, quiet = T, knit_root_dir = dir)) %>%   
+    # Safely render
+  unnest_wider(run) %>%
+    # Unnest the weird list
+  select(gp = group_number, p1f = partner_1, p1l = x3, p2f = partner_2, p2l = x5, 
+         rmd, result, error)
+
+DT::datatable(results_task_2)
+```
+
+## TASK 3
+
+### How many commit messages per user?
+``` {r}
+task_3_commits <- repos %>%
+  filter(str_detect(dir, 'grad')) %>%
+  mutate(results = map(dir, get_commits)) %>%
+  unnest(results) %>%
+  group_by(repo, user) %>%
+  count() %>%
+  filter(!user == 'GitHub')
+
+## Did anyone have fewer than 2 commits?
+less_than_2_t3 <- task_3_commits %>%
+  filter(n < 2)
+
+DT::datatable(task_3_commits)
+```
+
+### Does it render?
+
+Similar here: make sure there is a `data/ucsb_grad_data.csv` file in the project root.
+``` {r}
+# Render task 3
+results_task_3 <- repos_rmds %>%
+  filter(str_detect(dir, 'grad')) %>%
+  mutate(run = map(rmd, safely_render, quiet = T)) %>%
+  unnest_wider(run) %>%
+  select(gp = group_number, p1f = partner_1, p1l = x3, p2f = partner_2, p2l = x5, 
+         rmd, result, error)
+
+DT::datatable(results_task_3)
+```
+
+
+# Clean everything up
+
+This deletes all repos! only run after grading and before pushing the script
+
+``` {r, eval = FALSE}
+
+# unlink(repos_rmds$dir, force = TRUE, recursive = TRUE)
+
 ```
 
